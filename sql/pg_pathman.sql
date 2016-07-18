@@ -588,6 +588,11 @@ LANGUAGE plpgsql;
 -- check that all data was transfered to partitions
 SELECT COUNT(*) FROM ONLY test.hash_rel;
 SELECT COUNT(*) FROM test.hash_rel;
+EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel WHERE id = 1;
+SELECT pathman.disable_parent('test.hash_rel');
+EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel WHERE id = 1;
+SELECT pathman.enable_parent('test.hash_rel');
+EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel WHERE id = 1;
 
 DROP EXTENSION pg_pathman CASCADE;
 

@@ -1473,6 +1473,46 @@ SELECT COUNT(*) FROM test.hash_rel;
  100000
 (1 row)
 
+EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel WHERE id = 1;
+          QUERY PLAN          
+------------------------------
+ Append
+   ->  Seq Scan on hash_rel
+         Filter: (id = 1)
+   ->  Seq Scan on hash_rel_2
+         Filter: (id = 1)
+(5 rows)
+
+SELECT pathman.disable_parent('test.hash_rel');
+ disable_parent 
+----------------
+ 
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel WHERE id = 1;
+          QUERY PLAN          
+------------------------------
+ Append
+   ->  Seq Scan on hash_rel_2
+         Filter: (id = 1)
+(3 rows)
+
+SELECT pathman.enable_parent('test.hash_rel');
+ enable_parent 
+---------------
+ 
+(1 row)
+
+EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel WHERE id = 1;
+          QUERY PLAN          
+------------------------------
+ Append
+   ->  Seq Scan on hash_rel
+         Filter: (id = 1)
+   ->  Seq Scan on hash_rel_2
+         Filter: (id = 1)
+(5 rows)
+
 DROP EXTENSION pg_pathman CASCADE;
 NOTICE:  drop cascades to 3 other objects
 /* Test that everithing works fine without schemas */
