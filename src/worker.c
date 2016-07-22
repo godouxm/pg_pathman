@@ -11,6 +11,7 @@
 #include "utils/lsyscache.h"
 #include "utils/memutils.h"
 #include "utils/fmgroids.h"
+#include "utils/builtins.h"
 #include "utils.h"
 #include "miscadmin.h"
 #include "funcapi.h"
@@ -141,7 +142,7 @@ start_bg_worker(char name[BGW_MAXLEN],
 	bgw_status = WaitForBackgroundWorkerStartup(bgw_handle, &pid);
 	HandleError(bgw_status == BGWH_POSTMASTER_DIED, BGW_PM_DIED);
 
-	// elog(NOTICE, "worker pid: %u", pid);
+	elog(NOTICE, "worker pid: %u", pid);
 	// sleep(30);
 
 	if(wait)
@@ -435,6 +436,8 @@ partition_data_bg_worker_main(Datum main_arg)
 	int rows;
 	int slot_idx = DatumGetInt32(main_arg);
 	MemoryContext	worker_context = CurrentMemoryContext;
+	int failures_count = 0;
+	bool failed;
 
 	/* Create resource owner */
 	CurrentResourceOwner = ResourceOwnerCreate(NULL, "PartitionDataWorker");
@@ -452,9 +455,11 @@ partition_data_bg_worker_main(Datum main_arg)
 
 	/* Establish connection and start transaction */
 	BackgroundWorkerInitializeConnectionByOid(args->key.dbid, InvalidOid);
+	// sleep(30);
 
 	do
 	{
+		failed = false;
 		StartTransactionCommand();
 		SPI_connect();
 		PushActiveSnapshot(GetTransactionSnapshot());
@@ -470,7 +475,7 @@ partition_data_bg_worker_main(Datum main_arg)
 			 * context will be destroyed after transaction finishes
 			 */
 			oldcontext = MemoryContextSwitchTo(worker_context);
-			sql = psprintf("SELECT %s.partition_data($1, p_limit:=$2)", schema);
+			sql = psprintf("SELECT %s.partition_data($1::oid, p_limit:=$2)", schema);
 			MemoryContextSwitchTo(oldcontext);
 		}
 
@@ -492,24 +497,53 @@ partition_data_bg_worker_main(Datum main_arg)
 		}
 		PG_CATCH();
 		{
-			pfree(sql);
-			pfree(schema);
-			args->status = WS_FREE;
-			elog(ERROR, "Partition data failed");
+			// SPI_finish();
+			// PopActiveSnapshot();
+			// AbortCurrentTransaction();
+			EmitErrorReport();
+			FlushErrorState();
+
+			elog(WARNING, "Error #%u", failures_count);
+			/*
+			 * The most common exception we can catch here is a deadlock with
+			 * concurrent user queries. Check that attempts count doesn't exceed
+			 * some reasonable value
+			 */
+			if (100 <= failures_count++)
+			{
+				pfree(sql);
+				pfree(schema);
+				args->status = WS_FREE;
+				// elog(WARNING, "Finishing...");
+				elog(ERROR, "Failures count exceeded 100. Finishing...");
+				exit(1);
+				// PG_RE_THROW();
+			}
+			failed = true;
 		}
 		PG_END_TRY();
 
 		SPI_finish();
 		PopActiveSnapshot();
-		CommitTransactionCommand();
-
-		args->total_rows += rows;
+		if (failed)
+		{
+			/* abort transaction and sleep for a second */
+			AbortCurrentTransaction();
+			DirectFunctionCall1(pg_sleep, Float8GetDatum(1));
+		}
+		else
+		{
+			/* Reset failures counter and commit transaction */
+			CommitTransactionCommand();
+			failures_count = 0;
+			args->total_rows += rows;
+		}
 
 		/* If other backend requested to stop worker then quit */
 		if (args->status == WS_STOPPING)
 			break;
 	}
-	while(rows > 0);  /* do while there is still rows to relocate */
+	while(rows > 0 || failed);  /* do while there is still rows to relocate */
 
 	pfree(sql);
 	pfree(schema);

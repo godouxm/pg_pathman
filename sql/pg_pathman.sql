@@ -561,33 +561,65 @@ DROP TABLE test."RangeRel" CASCADE;
 CREATE TABLE test.hash_rel (
 	id  SERIAL,
 	txt TEXT);
-INSERT INTO test.hash_rel(id) SELECT generate_series(1, 100000);
+INSERT INTO test.hash_rel(id) SELECT generate_series(1, 200000);
 SELECT pathman.create_hash_partitions('test.hash_rel', 'id', 3, p_partition_data := false);
 EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel;
 -- start worker
 SELECT pathman.partition_data_worker('test.hash_rel'::regclass);
+-- SELECT pg_sleep(1);
+-- start concurrent update
+-- UPDATE test.hash_rel SET txt = 'test';
+
+CREATE OR REPLACE FUNCTION wait_concurrent()
+RETURNS BOOLEAN AS
+$$
+DECLARE
+	rows INT;
+BEGIN
+	UPDATE test.hash_rel SET txt = 'test' WHERE id IN (
+		SELECT (random() * 200000)::int FROM generate_series(1, 10)
+	);
+
+	SELECT COUNT(*) INTO rows
+	FROM pathman.pathman_active_workers WHERE relid = 'test.hash_rel'::regclass::oid;
+
+	IF rows > 0 THEN
+		RETURN FALSE;
+	END IF;
+
+	RAISE NOTICE '>>>>>>>>>>>>>>>>>>>>>>>>>';
+	RETURN TRUE;
+		-- UPDATE test.hash_rel SET txt = 'test';
+-- catch a deadlock exception
+EXCEPTION WHEN deadlock_detected THEN
+	-- do nothing, this is what we could excpect when parallel updates occure
+	RAISE NOTICE '>>>>>>>>> WHOUUPSEE!!! <<<<<<<<<';
+	RETURN FALSE;
+END
+$$
+LANGUAGE plpgsql;
+
 -- wait until it finishes
 DO
 $$
 DECLARE
-	countdown INT := 60;
-	rows      INT := 1;
+	countdown INT := 120;
+	finished  BOOLEAN := FALSE;
 BEGIN
-	WHILE rows > 0 AND countdown > 0
+	WHILE finished = FALSE AND countdown > 0
 	LOOP
-		PERFORM pg_sleep(1);
-
-		SELECT COUNT(*) INTO rows
-		FROM pathman.pathman_active_workers WHERE relid = 'test.hash_rel'::regclass::oid;
-
+		PERFORM pg_sleep(4);
+		finished := wait_concurrent();
 		countdown := countdown - 1;
 	END LOOP;
 END
 $$
 LANGUAGE plpgsql;
+SELECT pathman.stop_worker('test.hash_rel');
 -- check that all data was transfered to partitions
 SELECT COUNT(*) FROM ONLY test.hash_rel;
 SELECT COUNT(*) FROM test.hash_rel;
+SELECT COUNT(*) > 0 FROM test.hash_rel WHERE NOT txt IS NULL;
 EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel WHERE id = 1;
 SELECT pathman.disable_parent('test.hash_rel');
 EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel WHERE id = 1;

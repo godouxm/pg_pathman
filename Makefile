@@ -38,3 +38,6 @@ isolationcheck: | submake-isolation
 	    --temp-config=$(top_srcdir)/$(subdir)/conf.add \
 	    --outputdir=./isolation_output \
 	    $(ISOLATIONCHECKS)
+
+wal-check: temp-install
+	$(prove_check)
