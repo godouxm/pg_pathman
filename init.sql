@@ -74,12 +74,16 @@ LANGUAGE plpgsql;
 /*
  * Partitioning data tools
  */
-CREATE OR REPLACE FUNCTION @extschema@.active_workers(
-	OUT pid INT,
-	OUT dbid INT,
-	OUT relid INT,
-	OUT processed INT,
-	OUT status TEXT)
+CREATE TYPE worker_info AS (
+	pid       INT,
+	dbid      INT,
+	relid     INT,
+	processed INT,
+	status    TEXT
+);
+
+CREATE OR REPLACE FUNCTION @extschema@.active_workers()
+RETURNS SETOF worker_info
 AS 'pg_pathman' LANGUAGE C STRICT;
 
 CREATE OR REPLACE VIEW @extschema@.pathman_active_workers
@@ -207,7 +211,7 @@ BEGIN
     EXECUTE format('
         WITH data AS (
             DELETE FROM ONLY %1$s WHERE ctid IN (
-                SELECT ctid FROM ONLY %1$s %2$s %3$s FOR UPDATE NOWAIT
+                SELECT ctid FROM ONLY %1$s %2$s %3$s FOR UPDATE SKIP LOCKED
             ) RETURNING *)
         INSERT INTO %1$s SELECT * FROM data'
         , p_relation, v_where_clause, v_limit_clause)
