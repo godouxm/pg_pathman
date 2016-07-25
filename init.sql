@@ -74,17 +74,14 @@ LANGUAGE plpgsql;
 /*
  * Partitioning data tools
  */
-CREATE TYPE worker_info AS (
+CREATE OR REPLACE FUNCTION @extschema@.active_workers()
+RETURNS TABLE (
 	pid       INT,
 	dbid      INT,
 	relid     INT,
 	processed INT,
 	status    TEXT
-);
-
-CREATE OR REPLACE FUNCTION @extschema@.active_workers()
-RETURNS SETOF worker_info
-AS 'pg_pathman' LANGUAGE C STRICT;
+) AS 'pg_pathman' LANGUAGE C STRICT;
 
 CREATE OR REPLACE VIEW @extschema@.pathman_active_workers
 AS SELECT * FROM @extschema@.active_workers();

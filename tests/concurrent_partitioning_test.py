@@ -23,7 +23,7 @@ setup_cmd = [
 	'drop table if exists abc cascade',
 	'create extension pg_pathman',
 	'create table abc(id serial, t text)',
-	'insert into abc select generate_series(1, 500000)',
+	'insert into abc select generate_series(1, 300000)',
 	'select create_hash_partitions(\'abc\', \'id\', 3, p_partition_data := false)',
 ]
 
@@ -83,26 +83,34 @@ def main(config):
 		# update some rows to check for deadlocks
 		cur.execute('''
 			update abc set t = 'test'
-			where id in (select (random() * 500000)::int from generate_series(1, 5000))
+			where id in (select (random() * 300000)::int from generate_series(1, 3000))
 			''')
 
 		cur.execute('select count(*) from pathman_active_workers')
 		row = cur.fetchone()
 		con.commit()
-		print row
+
+		# if there is no active workers then it means work is done
 		if row[0] == 0:
 			break
 		time.sleep(1)
+
+	cur.execute('select count(*) from only abc')
+	row = cur.fetchone()
+	assert(row[0] == 0)
+	cur.execute('select count(*) from abc')
+	row = cur.fetchone()
+	assert(row[0] == 300000)
 
 	teardown(con)
 	con.close()
 
 if __name__ == '__main__':
-    parser = argparse.ArgumentParser(description='pgdb - postgres plpgsql debugger')
+    parser = argparse.ArgumentParser(description='Concurrent partitioning test')
     parser.add_argument('--host', default='localhost', help='postgres server host')
     parser.add_argument('--port', type=int, default=5432, help='postgres server port')
     parser.add_argument('--user', dest='user', default='postgres', help='user name')
     parser.add_argument('--database', dest='database', default='postgres', help='database name')
-    parser.add_argument('--pass', dest='password', nargs=0, action=PasswordPromptAction, default='')
+    parser.add_argument('--password', dest='password', nargs=0, action=PasswordPromptAction, default='')
     args = parser.parse_args()
     main(args.__dict__)
