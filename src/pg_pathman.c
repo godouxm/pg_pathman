@@ -32,9 +32,8 @@
 #include "utils/guc.h"
 #include "utils/lsyscache.h"
 #include "utils/selfuncs.h"
+#include "utils/memutils.h"
 #include "access/heapam.h"
-#include "access/nbtree.h"
-#include "access/sysattr.h"
 #include "storage/ipc.h"
 #include "catalog/pg_type.h"
 #include "foreign/fdwapi.h"
@@ -99,8 +98,6 @@ static Path *get_cheapest_parameterized_child_path(PlannerInfo *root, RelOptInfo
 	((int) FunctionCall2(cmp_func, arg1, arg2) >= 0)
 #define check_gt(flinfo, arg1, arg2) \
 	((int) FunctionCall2(cmp_func, arg1, arg2) > 0)
-
-#define WcxtHasExprContext(wcxt) ( (wcxt)->econtext )
 
 /* We can transform Param into Const provided that 'econtext' is available */
 #define IsConstValue(wcxt, node) \
@@ -184,9 +181,10 @@ get_pathman_range_relation(Oid relid, bool *found)
 void
 disable_inheritance(Query *parse)
 {
-	ListCell		 *lc;
-	RangeTblEntry	 *rte;
-	PartRelationInfo *prel;
+	ListCell		   *lc;
+	RangeTblEntry	   *rte;
+	PartRelationInfo   *prel;
+	MemoryContext		oldcontext;
 	bool	found;
 
 	/* If query contains CTE (WITH statement) then handle subqueries too */
@@ -215,8 +213,10 @@ disable_inheritance(Query *parse)
 						 * when user uses ONLY statement from case when we
 						 * make rte->inh false intentionally.
 						 */
+						oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 						inheritance_enabled_relids = \
 							lappend_oid(inheritance_enabled_relids, rte->relid);
+						MemoryContextSwitchTo(oldcontext);
 
 						/*
 						 * Check if relation was already found with ONLY modifier. In
@@ -231,8 +231,10 @@ disable_inheritance(Query *parse)
 					}
 				}
 
+				oldcontext = MemoryContextSwitchTo(TopMemoryContext);
 				inheritance_disabled_relids = \
 					lappend_oid(inheritance_disabled_relids, rte->relid);
+				MemoryContextSwitchTo(oldcontext);
 
 				/* Check if relation was already found withoud ONLY modifier */
 				if (list_member_oid(inheritance_enabled_relids, rte->relid))
@@ -329,7 +331,7 @@ handle_modification_query(Query *parse)
 		return;
 
 	/* Parse syntax tree and extract partition ranges */
-	InitWalkerContext(&context, prel, NULL);
+	InitWalkerContext(&context, prel, NULL, CurrentMemoryContext, false);
 	wrap = walk_expr_tree(expr, &context);
 	finish_least_greatest(wrap, &context);
 	clear_walker_context(&context);
@@ -677,12 +679,22 @@ wrapper_make_expression(WrapperNode *wrap, int index, bool *alwaysTrue)
 void
 refresh_walker_context_ranges(WalkerContext *context)
 {
-	RangeRelation *rangerel;
+	RangeRelation  *rangerel;
+	MemoryContext	old_mcxt;
 
 	rangerel = get_pathman_range_relation(context->prel->key.relid, NULL);
 
+	/* Clear old cached data */
+	clear_walker_context(context);
+
+	/* Switch to long-living context which should store data */
+	old_mcxt = MemoryContextSwitchTo(context->persistent_mcxt);
+
 	context->ranges = dsm_array_get_pointer(&rangerel->ranges, true);
 	context->nranges = rangerel->ranges.elem_count;
+
+	/* Switch back */
+	MemoryContextSwitchTo(old_mcxt);
 }
 
 /*
@@ -813,6 +825,7 @@ select_range_partitions(const Datum value,
 	}
 	else
 	{
+		Assert(ranges);
 		Assert(cmp_func);
 
 		/* Corner cases */
@@ -992,6 +1005,7 @@ handle_binary_opexpr(WalkerContext *context, WrapperNode *result,
 		case PT_RANGE:
 			if (get_pathman_range_relation(context->prel->key.relid, NULL))
 			{
+				/* Refresh 'ranges' cache if necessary */
 				if (!context->ranges)
 					refresh_walker_context_ranges(context);
 
@@ -1127,6 +1141,22 @@ handle_const(const Const *c, WalkerContext *context)
 	const PartRelationInfo *prel = context->prel;
 	WrapperNode			   *result = (WrapperNode *) palloc(sizeof(WrapperNode));
 
+	result->orig = (const Node *) c;
+
+	/*
+	 * Had to add this check for queries like:
+	 *   select * from test.hash_rel where txt = NULL;
+	 */
+	if (!context->for_insert)
+	{
+		result->rangeset = list_make1_irange(make_irange(0,
+														 prel->children_count - 1,
+														 true));
+		result->paramsel = 1.0;
+
+		return result;
+	}
+
 	switch (prel->parttype)
 	{
 		case PT_HASH:
@@ -1143,6 +1173,7 @@ handle_const(const Const *c, WalkerContext *context)
 
 				tce = lookup_type_cache(c->consttype, TYPECACHE_CMP_PROC_FINFO);
 
+				/* Refresh 'ranges' cache if necessary */
 				if (!context->ranges)
 					refresh_walker_context_ranges(context);
 
@@ -1157,8 +1188,7 @@ handle_const(const Const *c, WalkerContext *context)
 			break;
 
 		default:
-			result->rangeset = list_make1_irange(make_irange(0, prel->children_count - 1, true));
-			result->paramsel = 1.0;
+			elog(ERROR, "Unknown partitioning type %u", prel->parttype);
 			break;
 	}
 

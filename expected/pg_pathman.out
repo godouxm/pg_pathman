@@ -53,10 +53,10 @@ CREATE INDEX ON test.range_rel (dt);
 INSERT INTO test.range_rel (dt, txt)
 SELECT g, md5(g::TEXT) FROM generate_series('2015-01-01', '2015-04-30', '1 day'::interval) as g;
 SELECT pathman.create_range_partitions('test.range_rel', 'dt', '2015-01-01'::DATE, '1 month'::INTERVAL, 2);
-ERROR:  Partitioning key 'dt' must be NOT NULL P0001
+ERROR:  Partitioning key 'dt' must be NOT NULL
 ALTER TABLE test.range_rel ALTER COLUMN dt SET NOT NULL;
 SELECT pathman.create_range_partitions('test.range_rel', 'dt', '2015-01-01'::DATE, '1 month'::INTERVAL, 2);
-ERROR:  Not enough partitions to fit all the values of 'dt' P0001
+ERROR:  Not enough partitions to fit all the values of 'dt'
 SELECT pathman.create_range_partitions('test.range_rel', 'DT', '2015-01-01'::DATE, '1 month'::INTERVAL);
 NOTICE:  sequence "range_rel_seq" does not exist, skipping
 NOTICE:  Copying data to partitions...
@@ -1000,7 +1000,7 @@ EXPLAIN (COSTS OFF) SELECT * FROM test.range_rel WHERE dt BETWEEN '2014-12-15' A
 (3 rows)
 
 SELECT pathman.add_range_partition('test.range_rel', '2014-12-01'::DATE, '2015-01-02'::DATE);
-ERROR:  Specified range overlaps with existing partitions P0001
+ERROR:  Specified range overlaps with existing partitions
 SELECT pathman.add_range_partition('test.range_rel', '2014-12-01'::DATE, '2015-01-01'::DATE);
 NOTICE:  Done!
  add_range_partition 
@@ -1020,7 +1020,7 @@ EXPLAIN (COSTS OFF) SELECT * FROM test.range_rel WHERE dt BETWEEN '2014-12-15' A
 
 CREATE TABLE test.range_rel_archive (LIKE test.range_rel INCLUDING ALL);
 SELECT pathman.attach_range_partition('test.range_rel', 'test.range_rel_archive', '2014-01-01'::DATE, '2015-01-01'::DATE);
-ERROR:  Specified range overlaps with existing partitions P0001
+ERROR:  Specified range overlaps with existing partitions
 SELECT pathman.attach_range_partition('test.range_rel', 'test.range_rel_archive', '2014-01-01'::DATE, '2014-12-01'::DATE);
  attach_range_partition 
 ------------------------
@@ -1059,12 +1059,12 @@ CREATE TABLE test.range_rel_test1 (
     txt TEXT,
     abc INTEGER);
 SELECT pathman.attach_range_partition('test.range_rel', 'test.range_rel_test1', '2013-01-01'::DATE, '2014-01-01'::DATE);
-ERROR:  Partition must have the exact same structure as parent P0001
+ERROR:  Partition must have the exact same structure as parent
 CREATE TABLE test.range_rel_test2 (
     id  SERIAL PRIMARY KEY,
     dt  TIMESTAMP);
 SELECT pathman.attach_range_partition('test.range_rel', 'test.range_rel_test2', '2013-01-01'::DATE, '2014-01-01'::DATE);
-ERROR:  Partition must have the exact same structure as parent P0001
+ERROR:  Partition must have the exact same structure as parent
 /*
  * Check that altering table columns doesn't break trigger
  */
@@ -1416,7 +1416,7 @@ NOTICE:  drop cascades to 3 other objects
 CREATE TABLE test.hash_rel (
 	id  SERIAL,
 	txt TEXT);
-INSERT INTO test.hash_rel(id) SELECT generate_series(1, 100000);
+INSERT INTO test.hash_rel(id) SELECT generate_series(1, 200000);
 SELECT pathman.create_hash_partitions('test.hash_rel', 'id', 3, p_partition_data := false);
  create_hash_partitions 
 ------------------------
@@ -1445,21 +1445,30 @@ NOTICE:  Worker started. You can stop it with the following command: select stop
 DO
 $$
 DECLARE
-	countdown INT := 60;
-	rows      INT := 1;
+	countdown INT := 120;
+	finished  BOOLEAN := FALSE;
+	rows      INT := 0;
 BEGIN
-	WHILE rows > 0 AND countdown > 0
+	WHILE finished = FALSE AND countdown > 0
 	LOOP
-		PERFORM pg_sleep(1);
-
 		SELECT COUNT(*) INTO rows
 		FROM pathman.pathman_active_workers WHERE relid = 'test.hash_rel'::regclass::oid;
 
+		IF rows <= 0 THEN
+			finished := TRUE;
+		END IF;
+
+		PERFORM pg_sleep(1);
+		
 		countdown := countdown - 1;
 	END LOOP;
+EXCEPTION WHEN others THEN
+	-- do nothing
 END
 $$
 LANGUAGE plpgsql;
+SELECT pathman.stop_worker('test.hash_rel');
+ERROR:  Worker for relation 'hash_rel' not found
 -- check that all data was transfered to partitions
 SELECT COUNT(*) FROM ONLY test.hash_rel;
  count 
@@ -1470,7 +1479,7 @@ SELECT COUNT(*) FROM ONLY test.hash_rel;
 SELECT COUNT(*) FROM test.hash_rel;
  count  
 --------
- 100000
+ 200000
 (1 row)
 
 EXPLAIN (COSTS OFF) SELECT * FROM test.hash_rel WHERE id = 1;
@@ -1725,7 +1734,7 @@ INSERT INTO messages SELECT g, md5(g::text) FROM generate_series(1, 10) as g;
 INSERT INTO replies SELECT g, g, md5(g::text) FROM generate_series(1, 10) as g;
 SELECT create_range_partitions('messages', 'id', 1, 100, 2);
 WARNING:  Foreign key 'replies_message_id_fkey' references to the relation 'messages'
-ERROR:  Relation 'messages' is referenced from other relations P0001
+ERROR:  Relation 'messages' is referenced from other relations
 ALTER TABLE replies DROP CONSTRAINT replies_message_id_fkey;
 SELECT create_range_partitions('messages', 'id', 1, 100, 2);
 NOTICE:  sequence "messages_seq" does not exist, skipping

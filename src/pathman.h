@@ -150,7 +150,7 @@ extern List			   *inheritance_disabled_relids;
 extern bool 			pg_pathman_enable;
 extern PathmanState    *pmstate;
 
-#define PATHMAN_GET_DATUM(value, by_val) ( (by_val) ? (value) : PointerGetDatum(&value) )
+#define PATHMAN_GET_DATUM(value, by_val) ( (by_val) ? (Datum) (value) : PointerGetDatum(&value) )
 
 typedef struct {
 	bool	ir_valid : 1;
@@ -230,8 +230,8 @@ void create_hash_restrictions_hashtable(void);
 void create_range_restrictions_hashtable(void);
 size_t get_worker_slots_size(void);
 void create_worker_slots(void);
-void load_relations_hashtable(bool reinitialize);
-void load_check_constraints(Oid parent_oid, Snapshot snapshot);
+void load_relations(bool reinitialize);
+void load_partitions(Oid parent_oid, Snapshot snapshot);
 void remove_relation_info(Oid relid);
 
 /* utility functions */
@@ -274,6 +274,9 @@ typedef struct
 	/* Main partitioning structure */
 	const PartRelationInfo *prel;
 
+	/* Long-living context for cached values */
+	MemoryContext			persistent_mcxt;
+
 	/* Cached values */
 	const RangeEntry	   *ranges;		/* cached RangeEntry array (copy) */
 	size_t					nranges;	/* number of RangeEntries */
@@ -284,18 +287,23 @@ typedef struct
 							hasGreatest;
 	Datum					least,
 							greatest;
+
+	bool					for_insert;	/* are we in PartitionFilter now? */
 } WalkerContext;
 
 /*
  * Usual initialization procedure for WalkerContext
  */
-#define InitWalkerContext(context, prel_info, ecxt) \
+#define InitWalkerContext(context, prel_info, ecxt, mcxt, for_ins) \
 	do { \
 		(context)->prel = (prel_info); \
 		(context)->econtext = (ecxt); \
 		(context)->ranges = NULL; \
+		(context)->nranges = 0; \
 		(context)->hasLeast = false; \
 		(context)->hasGreatest = false; \
+		(context)->persistent_mcxt = (mcxt); \
+		(context)->for_insert = (for_ins); \
 	} while (0)
 
 /*
@@ -303,18 +311,24 @@ typedef struct
  * in case of range partitioning, so 'wcxt' is stored
  * inside of Custom Node
  */
-#define InitWalkerContextCustomNode(context, prel_info, ecxt, isCached) \
+#define InitWalkerContextCustomNode(context, prel_info, ecxt, mcxt, for_ins, isCached) \
 	do { \
 		if (!*isCached) \
 		{ \
 			(context)->prel = prel_info; \
 			(context)->econtext = ecxt; \
 			(context)->ranges = NULL; \
+			(context)->nranges = 0; \
+			(context)->persistent_mcxt = (mcxt); \
+			(context)->for_insert = (for_ins); \
 			*isCached = true; \
 		} \
 		(context)->hasLeast = false; \
 		(context)->hasGreatest = false; \
 	} while (0)
+
+/* Check that WalkerContext contains ExprContext (plan execution stage) */
+#define WcxtHasExprContext(wcxt) ( (wcxt)->econtext )
 
 void select_range_partitions(const Datum value,
 							 const bool byVal,

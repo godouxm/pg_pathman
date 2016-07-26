@@ -7,6 +7,7 @@
  *
  * ------------------------------------------------------------------------
  */
+
 #include "pathman.h"
 #include "access/nbtree.h"
 #include "access/xact.h"
@@ -19,7 +20,6 @@
 #include "parser/parse_coerce.h"
 
 static Datum cast_datum(Datum src, Oid src_type, Oid target_type);
-static void on_rollback_after_partitions_created(XactEvent event, void *arg);
 
 /* declarations */
 PG_FUNCTION_INFO_V1( on_partitions_created );
@@ -87,88 +87,298 @@ cast_datum(Datum src, Oid src_type, Oid target_type)
 	return 0;
 }
 
-static void
-on_rollback_after_partitions_created(XactEvent event, void *arg)
+/*
+ * Partition-related operation type.
+ */
+typedef enum
 {
-	Oid		relid = *(Oid *) arg;
+	EV_ON_PART_CREATED = 1,
+	EV_ON_PART_UPDATED,
+	EV_ON_PART_REMOVED
+} part_event_type;
 
-	/* Catch abort event */
-	if (event == XACT_EVENT_ABORT)
+/*
+ * We have to reset shared memory cache each time a transaction
+ * containing a partitioning-related operation has been rollbacked,
+ * hence we need to pass a partitioned table's Oid & some other stuff.
+ *
+ * Note: 'relname' cannot be fetched within
+ * Xact callbacks, so we have to store it here.
+ */
+typedef struct part_abort_arg part_abort_arg;
+
+struct part_abort_arg
+{
+	Oid					partitioned_table_relid;
+	char			   *relname;
+
+	bool				is_subxact;		/* needed for correct callback removal */
+	SubTransactionId	subxact_id;		/* necessary for detecting specific subxact */
+	part_abort_arg	   *xact_cb_arg;	/* points to the parent Xact's arg */
+
+	part_event_type		event;			/* created | updated | removed partitions */
+
+	bool				expired;		/* set by (Sub)Xact when a job is done */
+};
+
+
+static part_abort_arg * make_part_abort_arg(Oid partitioned_table,
+											part_event_type event,
+											bool is_subxact,
+											part_abort_arg *xact_cb_arg);
+
+static void handle_part_event_cancellation(const part_abort_arg *arg);
+static void on_xact_abort_callback(XactEvent event, void *arg);
+static void on_subxact_abort_callback(SubXactEvent event, SubTransactionId mySubid,
+									  SubTransactionId parentSubid, void *arg);
+
+static void remove_on_xact_abort_callbacks(void *arg);
+static void add_on_xact_abort_callbacks(Oid partitioned_table, part_event_type event);
+
+static void on_partitions_created_internal(Oid partitioned_table, bool add_callbacks);
+static void on_partitions_updated_internal(Oid partitioned_table, bool add_callbacks);
+static void on_partitions_removed_internal(Oid partitioned_table, bool add_callbacks);
+
+
+/* Construct part_abort_arg for callbacks in TopTransactionContext. */
+static part_abort_arg *
+make_part_abort_arg(Oid partitioned_table, part_event_type event,
+					bool is_subxact, part_abort_arg *xact_cb_arg)
+{
+	part_abort_arg *arg = MemoryContextAlloc(TopTransactionContext,
+											 sizeof(part_abort_arg));
+
+	const char	   *relname = get_rel_name(partitioned_table);
+
+	/* Fill in Oid & relation name */
+	arg->partitioned_table_relid = partitioned_table;
+	arg->relname = MemoryContextStrdup(TopTransactionContext, relname);
+	arg->is_subxact = is_subxact;
+	arg->subxact_id = GetCurrentSubTransactionId(); /* for SubXact callback */
+	arg->xact_cb_arg = xact_cb_arg;
+	arg->event = event;
+	arg->expired = false;
+
+	return arg;
+}
+
+/* Revert shared memory cache changes iff xact has been aborted. */
+static void
+handle_part_event_cancellation(const part_abort_arg *arg)
+{
+#define DO_NOT_USE_CALLBACKS false /* just to clarify intentions */
+
+	switch (arg->event)
 	{
-		/* Clear cache */
-		LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
-		elog(WARNING, "Removing '%s' partitions from pg_pathman's cache", get_rel_name(relid));
-		remove_relation_info(relid);
-		LWLockRelease(pmstate->load_config_lock);
-	}
+		case EV_ON_PART_CREATED:
+			{
+				elog(WARNING, "Partitioning of table '%s' has been aborted, "
+							  "removing partitions from pg_pathman's cache",
+					 arg->relname);
 
-	UnregisterXactCallback(on_rollback_after_partitions_created, arg);
+				on_partitions_removed_internal(arg->partitioned_table_relid,
+											   DO_NOT_USE_CALLBACKS);
+			}
+			break;
+
+		case EV_ON_PART_UPDATED:
+			{
+				elog(WARNING, "All changes in partitioned table "
+							  "'%s' will be discarded",
+					 arg->relname);
+
+				on_partitions_updated_internal(arg->partitioned_table_relid,
+											   DO_NOT_USE_CALLBACKS);
+			}
+			break;
+
+		case EV_ON_PART_REMOVED:
+			{
+				elog(WARNING, "All changes in partitioned table "
+							  "'%s' will be discarded",
+					 arg->relname);
+
+				on_partitions_created_internal(arg->partitioned_table_relid,
+											   DO_NOT_USE_CALLBACKS);
+			}
+			break;
+
+		default:
+			elog(ERROR, "Unknown event spotted in xact callback");
+	}
+}
+
+/*
+ * Add & remove xact callbacks
+ */
+
+static void
+remove_on_xact_abort_callbacks(void *arg)
+{
+	part_abort_arg *parg = (part_abort_arg *) arg;
+
+	elog(DEBUG2, "remove_on_xact_abort_callbacks() "
+				 "[is_subxact = %s, relname = '%s', event = %u] "
+				 "triggered for relation %u",
+		 (parg->is_subxact ? "true" : "false"), parg->relname,
+		 parg->event, parg->partitioned_table_relid);
+
+	/* Is this a SubXact callback or not? */
+	if (!parg->is_subxact)
+		UnregisterXactCallback(on_xact_abort_callback, arg);
+	else
+		UnregisterSubXactCallback(on_subxact_abort_callback, arg);
+
 	pfree(arg);
+}
+
+static void
+add_on_xact_abort_callbacks(Oid partitioned_table, part_event_type event)
+{
+	part_abort_arg *xact_cb_arg = make_part_abort_arg(partitioned_table,
+													  event, false, NULL);
+
+	RegisterXactCallback(on_xact_abort_callback, (void *) xact_cb_arg);
+	execute_on_xact_mcxt_reset(TopTransactionContext,
+							   remove_on_xact_abort_callbacks,
+							   xact_cb_arg);
+
+	/* Register SubXact callback if necessary */
+	if (IsSubTransaction())
+	{
+		/*
+		 * SubXact callback's arg contains a pointer to the parent
+		 * Xact callback's arg. This will allow it to 'expire' both
+		 * args and to prevent Xact's callback from doing anything
+		 */
+		void *subxact_cb_arg = make_part_abort_arg(partitioned_table, event,
+												   true, xact_cb_arg);
+
+		RegisterSubXactCallback(on_subxact_abort_callback, subxact_cb_arg);
+		execute_on_xact_mcxt_reset(CurTransactionContext,
+								   remove_on_xact_abort_callbacks,
+								   subxact_cb_arg);
+	}
+}
+
+/*
+ * Xact & SubXact callbacks
+ */
+
+static void
+on_xact_abort_callback(XactEvent event, void *arg)
+{
+	part_abort_arg *parg = (part_abort_arg *) arg;
+
+	/* Check that this is an aborted Xact & action has not expired yet */
+	if ((event == XACT_EVENT_ABORT || event == XACT_EVENT_PARALLEL_ABORT) &&
+		!parg->expired)
+	{
+		handle_part_event_cancellation(parg);
+
+		/* Set expiration flag */
+		parg->expired = true;
+	}
+}
+
+static void
+on_subxact_abort_callback(SubXactEvent event, SubTransactionId mySubid,
+						  SubTransactionId parentSubid, void *arg)
+{
+	part_abort_arg *parg = (part_abort_arg *) arg;
+
+	Assert(parg->subxact_id != InvalidSubTransactionId);
+
+	/* Check if this is an aborted SubXact we've been waiting for */
+	if (event == SUBXACT_EVENT_ABORT_SUB &&
+		mySubid <= parg->subxact_id && !parg->expired)
+	{
+		handle_part_event_cancellation(parg);
+
+		/* Now set expiration flags to disable Xact callback */
+		parg->xact_cb_arg->expired = true;
+		parg->expired = true;
+	}
 }
 
 /*
  * Callbacks
  */
+
+static void
+on_partitions_created_internal(Oid partitioned_table, bool add_callbacks)
+{
+	elog(DEBUG2, "on_partitions_created() [add_callbacks = %s] "
+				 "triggered for relation %u",
+		 (add_callbacks ? "true" : "false"), partitioned_table);
+
+	LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
+	load_relations(false);
+	LWLockRelease(pmstate->load_config_lock);
+
+	/* Register hooks that will clear shmem cache if needed */
+	if (add_callbacks)
+		add_on_xact_abort_callbacks(partitioned_table, EV_ON_PART_CREATED);
+}
+
+static void
+on_partitions_updated_internal(Oid partitioned_table, bool add_callbacks)
+{
+	elog(DEBUG2, "on_partitions_updated() [add_callbacks = %s] "
+				 "triggered for relation %u",
+		 (add_callbacks ? "true" : "false"), partitioned_table);
+
+	if (get_pathman_relation_info(partitioned_table, NULL))
+	{
+		LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
+			remove_relation_info(partitioned_table);
+			load_relations(false);
+		LWLockRelease(pmstate->load_config_lock);
+	}
+
+	/* Register hooks that will clear shmem cache if needed */
+	if (add_callbacks)
+		add_on_xact_abort_callbacks(partitioned_table, EV_ON_PART_UPDATED);
+}
+
+static void
+on_partitions_removed_internal(Oid partitioned_table, bool add_callbacks)
+{
+	elog(DEBUG2, "on_partitions_removed() [add_callbacks = %s] "
+				 "triggered for relation %u",
+		 (add_callbacks ? "true" : "false"), partitioned_table);
+
+	LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
+		remove_relation_info(partitioned_table);
+	LWLockRelease(pmstate->load_config_lock);
+
+	/* Register hooks that will clear shmem cache if needed */
+	if (add_callbacks)
+		add_on_xact_abort_callbacks(partitioned_table, EV_ON_PART_REMOVED);
+}
+
+/*
+ * Thin layer between pure c and pl/PgSQL
+ */
+
 Datum
 on_partitions_created(PG_FUNCTION_ARGS)
 {
-	MemoryContext	old_ctx;
-	Oid			   *relid;
-
-	/* Acquire lock */
-	LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
-
-	/* Reload config */
-	/* TODO: reload just the specified relation */
-	load_relations_hashtable(false);
-
-	/* Register callback to handle transaction abortion */
-	old_ctx = CurrentMemoryContext;
-	MemoryContextSwitchTo(CurTransactionContext);
-	relid = palloc0(sizeof(Oid));
-	*relid = PG_GETARG_OID(0);
-	RegisterXactCallback(on_rollback_after_partitions_created, relid);
-	MemoryContextSwitchTo(old_ctx);
-
-	/* Release lock */
-	LWLockRelease(pmstate->load_config_lock);
-
+	on_partitions_created_internal(PG_GETARG_OID(0), true);
 	PG_RETURN_NULL();
 }
 
 Datum
 on_partitions_updated(PG_FUNCTION_ARGS)
 {
-	Oid					relid;
-	PartRelationInfo   *prel;
-
-	/* Parent relation oid */
-	relid = DatumGetInt32(PG_GETARG_DATUM(0));
-	prel = get_pathman_relation_info(relid, NULL);
-	if (prel != NULL)
-	{
-		LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
-		remove_relation_info(relid);
-		load_relations_hashtable(false);
-		LWLockRelease(pmstate->load_config_lock);
-	}
-
+	on_partitions_updated_internal(PG_GETARG_OID(0), true);
 	PG_RETURN_NULL();
 }
 
 Datum
 on_partitions_removed(PG_FUNCTION_ARGS)
 {
-	Oid		relid;
-
-	LWLockAcquire(pmstate->load_config_lock, LW_EXCLUSIVE);
-
-	/* parent relation oid */
-	relid = DatumGetInt32(PG_GETARG_DATUM(0));
-	remove_relation_info(relid);
-
-	LWLockRelease(pmstate->load_config_lock);
-
+	on_partitions_removed_internal(PG_GETARG_OID(0), true);
 	PG_RETURN_NULL();
 }
 
@@ -215,7 +425,7 @@ on_disable_parent(PG_FUNCTION_ARGS)
 Datum
 find_or_create_range_partition(PG_FUNCTION_ARGS)
 {
-	Oid					relid = DatumGetObjectId(PG_GETARG_DATUM(0));
+	Oid					relid = PG_GETARG_OID(0);
 	Datum				value = PG_GETARG_DATUM(1);
 	Oid					value_type = get_fn_expr_argtype(fcinfo->flinfo, 1);
 	RangeRelation	   *rangerel;
@@ -277,8 +487,8 @@ find_or_create_range_partition(PG_FUNCTION_ARGS)
 Datum
 get_range_partition_by_oid(PG_FUNCTION_ARGS)
 {
-	Oid					parent_oid = DatumGetObjectId(PG_GETARG_DATUM(0));
-	Oid					child_oid = DatumGetObjectId(PG_GETARG_DATUM(1));
+	Oid					parent_oid = PG_GETARG_OID(0);
+	Oid					child_oid = PG_GETARG_OID(1);
 	int					i;
 	bool				found = false;
 	PartRelationInfo   *prel;
@@ -328,8 +538,8 @@ get_range_partition_by_oid(PG_FUNCTION_ARGS)
 Datum
 get_range_partition_by_idx(PG_FUNCTION_ARGS)
 {
-	Oid					parent_oid = DatumGetObjectId(PG_GETARG_DATUM(0));
-	int					idx = DatumGetInt32(PG_GETARG_DATUM(1));
+	Oid					parent_oid = PG_GETARG_OID(0);
+	int					idx = PG_GETARG_INT32(1);
 	PartRelationInfo   *prel;
 	RangeRelation	   *rangerel;
 	RangeEntry		   *ranges;
@@ -366,21 +576,25 @@ get_range_partition_by_idx(PG_FUNCTION_ARGS)
 Datum
 check_overlap(PG_FUNCTION_ARGS)
 {
-	Oid					parent_oid = DatumGetObjectId(PG_GETARG_DATUM(0));
-	Datum				p1 = PG_GETARG_DATUM(1);
-	Oid					p1_type = get_fn_expr_argtype(fcinfo->flinfo, 1);
-	Datum				p2 = PG_GETARG_DATUM(2);
-	Oid					p2_type = get_fn_expr_argtype(fcinfo->flinfo, 2);
+	Oid					partitioned_table = PG_GETARG_OID(0);
+
+	Datum				p1 = PG_GETARG_DATUM(1),
+						p2 = PG_GETARG_DATUM(2);
+
+	Oid					p1_type = get_fn_expr_argtype(fcinfo->flinfo, 1),
+						p2_type = get_fn_expr_argtype(fcinfo->flinfo, 2);
+
+	FmgrInfo			cmp_func_1,
+						cmp_func_2;
+
 	PartRelationInfo   *prel;
 	RangeRelation	   *rangerel;
 	RangeEntry		   *ranges;
-	FmgrInfo			cmp_func_1;
-	FmgrInfo			cmp_func_2;
 	int					i;
 	bool				byVal;
 
-	prel = get_pathman_relation_info(parent_oid, NULL);
-	rangerel = get_pathman_range_relation(parent_oid, NULL);
+	prel = get_pathman_relation_info(partitioned_table, NULL);
+	rangerel = get_pathman_range_relation(partitioned_table, NULL);
 
 	if (!prel || !rangerel || prel->parttype != PT_RANGE)
 		PG_RETURN_NULL();
@@ -433,7 +647,7 @@ Datum
 get_type_hash_func(PG_FUNCTION_ARGS)
 {
 	TypeCacheEntry *tce;
-	int 			type_oid = DatumGetInt32(PG_GETARG_DATUM(0));
+	Oid 			type_oid = PG_GETARG_OID(0);
 
 	tce = lookup_type_cache(type_oid, TYPECACHE_HASH_PROC);
 
@@ -649,8 +863,8 @@ range_partitions_list(PG_FUNCTION_ARGS)
 Datum
 get_hash(PG_FUNCTION_ARGS)
 {
-	uint32 value = DatumGetUInt32(PG_GETARG_DATUM(0));
-	uint32 part_count = DatumGetUInt32(PG_GETARG_DATUM(1));
+	uint32	value = PG_GETARG_UINT32(0),
+			part_count = PG_GETARG_UINT32(1);
 
 	PG_RETURN_UINT32(make_hash(value, part_count));
 }

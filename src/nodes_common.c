@@ -11,7 +11,6 @@
 #include "nodes_common.h"
 #include "runtimeappend.h"
 #include "optimizer/restrictinfo.h"
-#include "optimizer/plancat.h"
 #include "utils/memutils.h"
 #include "utils.h"
 
@@ -215,7 +214,7 @@ unpack_runtimeappend_private(RuntimeAppendState *scan_state, CustomScan *cscan)
 
 	children_table = hash_create("Plan storage", nchildren,
 								 children_table_config,
-							     HASH_ELEM | HASH_BLOBS);
+								 HASH_ELEM | HASH_BLOBS);
 
 	i = 0;
 	forboth (oid_cell, custom_oids, plan_cell, cscan->custom_plans)
@@ -504,7 +503,8 @@ rescan_append_common(CustomScanState *node)
 	ranges = list_make1_irange(make_irange(0, prel->children_count - 1, false));
 
 	InitWalkerContextCustomNode(&scan_state->wcxt, scan_state->prel,
-								econtext, &scan_state->wcxt_cached);
+								econtext, CurrentMemoryContext, false,
+								&scan_state->wcxt_cached);
 
 	foreach (lc, scan_state->custom_exprs)
 	{

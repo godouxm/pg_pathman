@@ -108,8 +108,7 @@ BEGIN
 	RETURN p_count;
 
 EXCEPTION WHEN others THEN
-	PERFORM @extschema@.on_remove_partitions(p_relation::integer);
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$ LANGUAGE plpgsql;
 
@@ -188,8 +187,6 @@ BEGIN
 		p_start_value := p_start_value + p_interval;
 	END LOOP;
 
-	/* Create triggers */
-	-- PERFORM create_hash_update_trigger(relation, attribute, partitions_count);
 	/* Notify backend about changes */
 	PERFORM @extschema@.on_create_partitions(p_relation::regclass::oid);
 
@@ -201,8 +198,7 @@ BEGIN
 	RETURN p_count;
 
 EXCEPTION WHEN others THEN
-	PERFORM @extschema@.on_remove_partitions(p_relation::regclass::integer);
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$ LANGUAGE plpgsql;
 
@@ -269,8 +265,7 @@ BEGIN
 	RETURN i;
 
 EXCEPTION WHEN others THEN
-	PERFORM @extschema@.on_remove_partitions(p_relation::regclass::integer);
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$ LANGUAGE plpgsql;
 
@@ -330,8 +325,7 @@ BEGIN
 	RETURN i;
 
 EXCEPTION WHEN others THEN
-	PERFORM @extschema@.on_remove_partitions(p_relation::regclass::integer);
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$ LANGUAGE plpgsql;
 
@@ -418,61 +412,59 @@ CREATE OR REPLACE FUNCTION @extschema@.create_single_range_partition(
 RETURNS TEXT AS
 $$
 DECLARE
-    v_part_num      INT;
+	v_part_num      INT;
 	v_child_relname TEXT;
-    v_plain_child_relname TEXT;
+	v_plain_child_relname TEXT;
 	v_attname       TEXT;
-    v_sql           TEXT;
-    v_cond          TEXT;
-    v_plain_schema  TEXT;
-    v_plain_relname TEXT;
-    v_child_relname_exists INTEGER := 1;
-    v_seq_name      TEXT;
+	v_sql           TEXT;
+	v_cond          TEXT;
+	v_plain_schema  TEXT;
+	v_plain_relname TEXT;
+	v_child_relname_exists INTEGER := 1;
+	v_seq_name      TEXT;
 BEGIN
-    v_attname := attname FROM @extschema@.pathman_config
-                 WHERE relname::regclass = p_parent;
+	v_attname := attname FROM @extschema@.pathman_config
+				 WHERE relname::regclass = p_parent;
+
+	IF v_attname IS NULL THEN
+		RAISE EXCEPTION 'Table % is not partitioned', quote_ident(p_parent::TEXT);
+	END IF;
 
 	SELECT * INTO v_plain_schema, v_plain_relname
 	FROM @extschema@.get_plain_schema_and_relname(p_parent);
 
 	v_seq_name := @extschema@.get_sequence_name(v_plain_schema, v_plain_relname);
 
-    /* get next value from sequence */
-    LOOP
-        v_part_num := nextval(v_seq_name);
-        v_plain_child_relname := format('%s_%s', v_plain_relname, v_part_num);
-        v_child_relname := format('%s.%s',
-        						  v_plain_schema,
-        						  quote_ident(v_plain_child_relname));
-        v_child_relname_exists := count(*)
-                                  FROM pg_class
-                                  WHERE relnamespace::regnamespace || '.' || relname = v_child_relname
-                                  LIMIT 1;
-        EXIT WHEN v_child_relname_exists = 0;
-    END LOOP;
+	/* get next value from sequence */
+	LOOP
+		v_part_num := nextval(v_seq_name);
+		v_plain_child_relname := format('%s_%s', v_plain_relname, v_part_num);
+		v_child_relname := format('%s.%s',
+								  v_plain_schema,
+								  quote_ident(v_plain_child_relname));
+		v_child_relname_exists := count(*)
+								  FROM pg_class
+								  WHERE relnamespace::regnamespace || '.' || relname = v_child_relname
+								  LIMIT 1;
+		EXIT WHEN v_child_relname_exists = 0;
+	END LOOP;
 
-    /* Skip existing partitions */
-    IF EXISTS (SELECT * FROM pg_tables WHERE tablename = v_child_relname) THEN
-        RAISE WARNING 'Relation % already exists, skipping...', v_child_relname;
-        RETURN NULL;
-    END IF;
+	EXECUTE format('CREATE TABLE %s (LIKE %s INCLUDING ALL)'
+				   , v_child_relname
+				   , p_parent);
 
-    EXECUTE format('CREATE TABLE %s (LIKE %s INCLUDING ALL)'
-                   , v_child_relname
-                   , p_parent);
+	EXECUTE format('ALTER TABLE %s INHERIT %s'
+				   , v_child_relname
+				   , p_parent);
 
-    EXECUTE format('ALTER TABLE %s INHERIT %s'
-                   , v_child_relname
-                   , p_parent);
+	v_cond := @extschema@.get_range_condition(v_attname, p_start_value, p_end_value);
+	v_sql := format('ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s)'
+					, v_child_relname
+					, quote_ident(format('%s_%s_check', v_plain_schema, v_plain_child_relname))
+					, v_cond);
 
-    v_cond := @extschema@.get_range_condition(v_attname, p_start_value, p_end_value);
-    v_sql := format('ALTER TABLE %s ADD CONSTRAINT %s CHECK (%s)'
-                    , v_child_relname
-                    , quote_ident(format('%s_%s_check', v_plain_schema, v_plain_child_relname))
-                    , v_cond);
-
-    EXECUTE v_sql;
-    RETURN v_child_relname;
+	EXECUTE v_sql;
+	RETURN v_child_relname;
 END
 $$ LANGUAGE plpgsql;
 
@@ -503,9 +495,15 @@ BEGIN
 					  FROM pg_inherits
 					  WHERE inhrelid = v_child_relid;
 
-	SELECT attname, parttype INTO v_attname, v_part_type
+	SELECT attname, parttype
 	FROM @extschema@.pathman_config
-	WHERE relname::regclass = v_parent_relid::regclass;
+	WHERE relname::regclass = v_parent_relid::regclass
+	INTO v_attname, v_part_type;
+
+	IF v_attname IS NULL THEN
+		RAISE EXCEPTION 'Table % is not partitioned',
+						quote_ident(v_parent_relid::regclass::text);
+	END IF;
 
 	SELECT * INTO v_plain_schema, v_plain_relname
 	FROM @extschema@.get_plain_schema_and_relname(p_partition);
@@ -600,9 +598,15 @@ BEGIN
 		RAISE EXCEPTION 'Cannot merge partitions having different parents';
 	END IF;
 
-	SELECT attname, parttype INTO v_attname, v_part_type
+	SELECT attname, parttype
 	FROM @extschema@.pathman_config
-	WHERE relname::regclass = v_parent_relid1::regclass;
+	WHERE relname::regclass = v_parent_relid1::regclass
+	INTO v_attname, v_part_type;
+
+	IF v_attname IS NULL THEN
+		RAISE EXCEPTION 'Table % is not partitioned',
+						quote_ident(v_parent_relid1::regclass::text);
+	END IF;
 
 	/* Check if this is RANGE partition */
 	IF v_part_type != 2 THEN
@@ -628,7 +632,7 @@ LANGUAGE plpgsql;
  * partition will be destroyed.
  *
  * Notes: dummy field is used to pass the element type to the function
- * (it is neccessary because of pseudo-types used in function)
+ * (it is necessary because of pseudo-types used in function)
  */
 CREATE OR REPLACE FUNCTION @extschema@.merge_range_partitions_internal(
 	p_parent_relid OID
@@ -647,8 +651,14 @@ DECLARE
 	v_rng1			@extschema@.PATHMANRANGE;
 	v_rng2			@extschema@.PATHMANRANGE;
 BEGIN
-	SELECT attname INTO v_attname FROM @extschema@.pathman_config
-	WHERE relname::regclass = p_parent_relid::regclass;
+	SELECT attname FROM @extschema@.pathman_config
+	WHERE relname::regclass = p_parent_relid::regclass
+	INTO v_attname;
+
+	IF v_attname IS NULL THEN
+		RAISE EXCEPTION 'Table % is not partitioned',
+						quote_ident(p_parent_relid::regclass::text);
+	END IF;
 
 	SELECT * INTO v_plain_schema, v_plain_relname
 	FROM @extschema@.get_plain_schema_and_relname(p_part1);
@@ -707,16 +717,22 @@ CREATE OR REPLACE FUNCTION @extschema@.append_range_partition(
 RETURNS TEXT AS
 $$
 DECLARE
-	v_attname TEXT;
-	v_atttype TEXT;
-	v_part_name TEXT;
-	v_interval TEXT;
+	v_attname	TEXT;
+	v_atttype	TEXT;
+	v_part_name	TEXT;
+	v_interval	TEXT;
 BEGIN
 	/* Prevent concurrent partition creation */
 	PERFORM @extschema@.acquire_partitions_lock();
 
-	SELECT attname, range_interval INTO v_attname, v_interval
-	FROM @extschema@.pathman_config WHERE relname::regclass = p_relation;
+	SELECT attname, range_interval
+	FROM @extschema@.pathman_config
+	WHERE relname::regclass = p_relation
+	INTO v_attname, v_interval;
+
+	IF v_attname IS NULL THEN
+		RAISE EXCEPTION 'Table % is not partitioned', quote_ident(p_relation::TEXT);
+	END IF;
 
 	v_atttype := @extschema@.get_attribute_type_name(p_relation, v_attname);
 
@@ -734,7 +750,7 @@ BEGIN
 	RETURN v_part_name;
 
 EXCEPTION WHEN others THEN
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$
 LANGUAGE plpgsql;
@@ -784,8 +800,15 @@ BEGIN
 	/* Prevent concurrent partition creation */
 	PERFORM @extschema@.acquire_partitions_lock();
 
-	SELECT attname, range_interval INTO v_attname, v_interval
-	FROM @extschema@.pathman_config WHERE relname::regclass = p_relation;
+	SELECT attname, range_interval
+	FROM @extschema@.pathman_config
+	WHERE relname::regclass = p_relation
+	INTO v_attname, v_interval;
+
+	IF v_attname IS NULL THEN
+		RAISE EXCEPTION 'Table % is not partitioned', quote_ident(p_relation::TEXT);
+	END IF;
+
 	v_atttype := @extschema@.get_attribute_type_name(p_relation, v_attname);
 
 	EXECUTE format('SELECT @extschema@.prepend_partition_internal($1, $2, $3, NULL::%s)', v_atttype)
@@ -802,7 +825,7 @@ BEGIN
 	RETURN v_part_name;
 
 EXCEPTION WHEN others THEN
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$
 LANGUAGE plpgsql;
@@ -873,7 +896,7 @@ BEGIN
 	RETURN v_part_name;
 
 EXCEPTION WHEN others THEN
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$
 LANGUAGE plpgsql;
@@ -912,7 +935,7 @@ BEGIN
 	RETURN v_part_name;
 
 EXCEPTION WHEN others THEN
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$
 LANGUAGE plpgsql;
@@ -949,9 +972,9 @@ BEGIN
 		RAISE EXCEPTION 'Specified range overlaps with existing partitions';
 	END IF;
 
-    IF NOT @extschema@.validate_relations_equality(p_relation, p_partition) THEN
-        RAISE EXCEPTION 'Partition must have the exact same structure as parent';
-    END IF;
+	IF NOT @extschema@.validate_relations_equality(p_relation, p_partition) THEN
+		RAISE EXCEPTION 'Partition must have the exact same structure as parent';
+	END IF;
 
 	/* Set inheritance */
 	EXECUTE format('ALTER TABLE %s INHERIT %s'
@@ -959,7 +982,14 @@ BEGIN
 				   , p_relation);
 
 	/* Set check constraint */
-	v_attname := attname FROM @extschema@.pathman_config WHERE relname::regclass = p_relation;
+	v_attname := attname
+	FROM @extschema@.pathman_config
+	WHERE relname::regclass = p_relation;
+
+	IF v_attname IS NULL THEN
+		RAISE EXCEPTION 'Table % is not partitioned', quote_ident(p_relation::TEXT);
+	END IF;
+
 	v_cond := @extschema@.get_range_condition(v_attname, p_start_value, p_end_value);
 
 	/* Plain partition name and schema */
@@ -978,7 +1008,7 @@ BEGIN
 	RETURN p_partition;
 
 EXCEPTION WHEN others THEN
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$
 LANGUAGE plpgsql;
@@ -1019,7 +1049,7 @@ BEGIN
 	RETURN p_partition;
 
 EXCEPTION WHEN others THEN
-	RAISE EXCEPTION '% %', SQLERRM, SQLSTATE;
+	RAISE EXCEPTION '%', SQLERRM;
 END
 $$
 LANGUAGE plpgsql;
@@ -1029,7 +1059,7 @@ LANGUAGE plpgsql;
  * Creates an update trigger
  */
 CREATE OR REPLACE FUNCTION @extschema@.create_range_update_trigger(
-	IN relation TEXT)
+	IN relation REGCLASS)
 RETURNS TEXT AS
 $$
 DECLARE
@@ -1064,8 +1094,7 @@ DECLARE
 	num         INTEGER := 0;
 	attr        TEXT;
 BEGIN
-	relation := @extschema@.validate_relname(relation);
-	relid := relation::regclass::oid;
+	relid := relation::oid;
 	SELECT string_agg(attname, ', '),
 		   string_agg('OLD.' || attname, ', '),
 		   string_agg('NEW.' || attname, ', '),
@@ -1080,7 +1109,14 @@ BEGIN
 		   att_val_fmt,
 		   att_fmt;
 
-	attr := attname FROM @extschema@.pathman_config WHERE relname = relation;
+	attr := attname
+	FROM @extschema@.pathman_config
+	WHERE relname::regclass = relation;
+
+	IF attr IS NULL THEN
+		RAISE EXCEPTION 'Table % is not partitioned', quote_ident(relation::TEXT);
+	END IF;
+
 	EXECUTE format(func, relation, attr, 0, att_val_fmt,
 				   old_fields, att_fmt, new_fields);
 	FOR rec in (SELECT * FROM pg_inherits WHERE inhparent = relation::regclass::oid)
@@ -1106,7 +1142,6 @@ CREATE OR REPLACE FUNCTION @extschema@.append_partitions_on_demand_internal(
 RETURNS OID AS
 $$
 DECLARE
-	v_relation TEXT;
 	v_cnt INTEGER := 0;
 	i INTEGER := 0;
 	v_part TEXT;
@@ -1119,11 +1154,16 @@ DECLARE
 	v_is_date BOOLEAN;
 	v_rng @extschema@.PATHMANRANGE;
 BEGIN
-	v_relation := @extschema@.validate_relname(p_relid::regclass::text);
-
 	/* get attribute name and interval */
-	SELECT attname, range_interval INTO v_attname, v_interval
-	FROM @extschema@.pathman_config WHERE relname = v_relation;
+	SELECT attname, range_interval
+	FROM @extschema@.pathman_config
+	WHERE relname::regclass = p_relid::regclass
+	INTO v_attname, v_interval;
+
+	IF v_attname IS NULL THEN
+		RAISE EXCEPTION 'Table % is not partitioned',
+						quote_ident(p_relid::regclass::text);
+	END IF;
 
 
 	v_rng := @extschema@.get_whole_range(p_relid);

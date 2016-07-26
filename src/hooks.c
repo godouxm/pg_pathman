@@ -48,6 +48,7 @@ pathman_join_pathlist_hook(PlannerInfo *root,
 	ListCell		   *lc;
 	double				paramsel;
 	WalkerContext		context;
+	bool				context_initialized;
 	bool				innerrel_rinfo_contains_part_attr;
 
 	if (set_join_pathlist_next)
@@ -83,15 +84,16 @@ pathman_join_pathlist_hook(PlannerInfo *root,
 		otherclauses = NIL;
 	}
 
+	context_initialized = false;
 	paramsel = 1.0;
 	foreach (lc, joinclauses)
 	{
-		WrapperNode	   *wrap;
+		WrapperNode *wrap;
 
-		context.prel = inner_prel;
-		context.econtext = NULL;
-		context.hasLeast = false;
-		context.hasGreatest = false;
+		/* We aim to persist cached context->ranges */
+		InitWalkerContextCustomNode(&context, inner_prel, NULL,
+									CurrentMemoryContext, false,
+									&context_initialized);
 
 		wrap = walk_expr_tree((Expr *) lfirst(lc), &context);
 		paramsel *= wrap->paramsel;
@@ -223,7 +225,7 @@ pathman_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTb
 		ranges = list_make1_irange(make_irange(0, prel->children_count - 1, false));
 
 		/* Make wrappers over restrictions and collect final rangeset */
-		InitWalkerContext(&context, prel, NULL);
+		InitWalkerContext(&context, prel, NULL, CurrentMemoryContext, false);
 		wrappers = NIL;
 		foreach(lc, rel->baserestrictinfo)
 		{
@@ -349,7 +351,8 @@ pathman_rel_pathlist_hook(PlannerInfo *root, RelOptInfo *rel, Index rti, RangeTb
 	}
 }
 
-void pg_pathman_enable_assign_hook(bool newval, void *extra)
+void
+pg_pathman_enable_assign_hook(bool newval, void *extra)
 {
 	/* Return quickly if nothing has changed */
 	if (newval == (pg_pathman_enable &&
@@ -428,7 +431,9 @@ pathman_planner_hook(Query *parse, int cursorOptions, ParamListInfo boundParams)
 	}
 
 	list_free(inheritance_disabled_relids);
+	list_free(inheritance_enabled_relids);
 	inheritance_disabled_relids = NIL;
+	inheritance_enabled_relids = NIL;
 
 	return result;
 }

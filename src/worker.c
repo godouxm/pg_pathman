@@ -142,7 +142,7 @@ start_bg_worker(char name[BGW_MAXLEN],
 	bgw_status = WaitForBackgroundWorkerStartup(bgw_handle, &pid);
 	HandleError(bgw_status == BGWH_POSTMASTER_DIED, BGW_PM_DIED);
 
-	elog(NOTICE, "worker pid: %u", pid);
+	// elog(NOTICE, "worker pid: %u", pid);
 	// sleep(30);
 
 	if(wait)
@@ -385,7 +385,7 @@ create_partitions(Oid relid, Datum value, Oid value_type, bool *crashed)
 			/* Update relation info */
 			free_dsm_array(&rangerel->ranges);
 			free_dsm_array(&prel->children);
-			load_check_constraints(relid, GetCatalogSnapshot(relid));
+			load_partitions(relid, GetCatalogSnapshot(relid));
 		}
 
 		*crashed = false;
