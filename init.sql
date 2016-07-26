@@ -208,7 +208,7 @@ BEGIN
     EXECUTE format('
         WITH data AS (
             DELETE FROM ONLY %1$s WHERE ctid IN (
-                SELECT ctid FROM ONLY %1$s %2$s %3$s FOR UPDATE SKIP LOCKED
+                SELECT ctid FROM ONLY %1$s %2$s %3$s FOR UPDATE NOWAIT
             ) RETURNING *)
         INSERT INTO %1$s SELECT * FROM data'
         , p_relation, v_where_clause, v_limit_clause)
