@@ -460,6 +460,7 @@ partition_data_bg_worker_main(Datum main_arg)
 	do
 	{
 		failed = false;
+		rows = 0;
 		StartTransactionCommand();
 		SPI_connect();
 		PushActiveSnapshot(GetTransactionSnapshot());
@@ -497,9 +498,6 @@ partition_data_bg_worker_main(Datum main_arg)
 		}
 		PG_CATCH();
 		{
-			// SPI_finish();
-			// PopActiveSnapshot();
-			// AbortCurrentTransaction();
 			EmitErrorReport();
 			FlushErrorState();
 
@@ -514,10 +512,8 @@ partition_data_bg_worker_main(Datum main_arg)
 				pfree(sql);
 				pfree(schema);
 				args->status = WS_FREE;
-				// elog(WARNING, "Finishing...");
 				elog(ERROR, "Failures count exceeded 100. Finishing...");
 				exit(1);
-				// PG_RE_THROW();
 			}
 			failed = true;
 		}
@@ -546,7 +542,8 @@ partition_data_bg_worker_main(Datum main_arg)
 	while(rows > 0 || failed);  /* do while there is still rows to relocate */
 
 	pfree(sql);
-	pfree(schema);
+	if (schema)
+		pfree(schema);
 	args->status = WS_FREE;
 }
 
