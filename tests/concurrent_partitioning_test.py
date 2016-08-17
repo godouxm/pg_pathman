@@ -7,7 +7,7 @@
 """
 
 import unittest
-from PostgresNode import get_new_node, clean_all
+from testgres import get_new_node, clean_all, stop_all
 from subprocess import Popen, PIPE
 import subprocess
 import time
@@ -19,7 +19,8 @@ class ConcurrentTest(unittest.TestCase):
 		pass
 
 	def tearDown(self):
-		clean_all()
+		stop_all()
+		# clean_all()
 
 	def test_concurrent(self):
 		setup_cmd = [
