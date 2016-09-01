@@ -84,9 +84,12 @@ source /tmp/envs/pg_pathman/bin/activate
 # install pip packages
 pip install $pip_packages
 
+# set permission to write postgres locks
+chmod a+w /var/run/postgresql/
+
 # run python tests
 cd tests
-PG_CONFIG=$config_path python -m unittest partitioning_test
+PG_CONFIG=$config_path python -m unittest partitioning_test || status=$?
 
 cat /var/log/postgresql/postgresql-$PGVERSION-main.log
 
