@@ -75,7 +75,7 @@ PGPORT=55435 make installcheck USE_PGXS=1 PGUSER=postgres PG_CONFIG=$config_path
 # show diff if it exists
 if test -f regression.diffs; then cat regression.diffs; fi
 
-set +ux
+set +u
 
 # create a virtual environment and activate it
 virtualenv /tmp/envs/pg_pathman
@@ -90,8 +90,6 @@ sudo chmod a+w /var/run/postgresql/
 # run python tests
 cd tests
 PG_CONFIG=$config_path python -m unittest partitioning_test || status=$?
-
-cat /var/log/postgresql/postgresql-$PGVERSION-main.log
 
 set -u
 
