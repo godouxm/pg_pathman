@@ -75,6 +75,8 @@ PGPORT=55435 make installcheck USE_PGXS=1 PGUSER=postgres PG_CONFIG=$config_path
 # show diff if it exists
 if test -f regression.diffs; then cat regression.diffs; fi
 
+set +u
+
 # create a virtual environment and activate it
 virtualenv /tmp/envs/pg_pathman
 source /tmp/envs/pg_pathman/bin/activate
@@ -85,5 +87,7 @@ pip install $pip_packages
 # run python tests
 cd tests
 python -m unittest partitioning_test
+
+set -u
 
 exit $status
