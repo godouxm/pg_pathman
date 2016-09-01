@@ -85,7 +85,7 @@ source /tmp/envs/pg_pathman/bin/activate
 pip install $pip_packages
 
 # set permission to write postgres locks
-chmod a+w /var/run/postgresql/
+sudo chmod a+w /var/run/postgresql/
 
 # run python tests
 cd tests
