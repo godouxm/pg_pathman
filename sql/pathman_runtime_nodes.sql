@@ -43,7 +43,10 @@ declare
 	plan jsonb;
 	num int;
 begin
-	plan = test.pathman_test('select * from test.runtime_test_1 where id = (select * from test.run_values limit 1)');
+	/*
+	 * Test subquery under hash partitioning
+	 */
+	plan = test.pathman_test('select * from test.runtime_test_hash_1 where id = (select * from test.run_values limit 1)');
 
 	perform test.pathman_equal((plan->0->'Plan'->'Node Type')::text,
 							   '"Custom Scan"',
@@ -54,11 +57,32 @@ begin
 							   'wrong plan provider');
 
 	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Relation Name')::text,
-							   format('"runtime_test_1_%s"', pathman.get_hash_part_idx(hashint4(1), 6)),
+							   format('"runtime_test_hash_1_%s"', pathman.get_hash_part_idx(hashint4(1), 6)),
 							   'wrong partition');
 
 	select count(*) from jsonb_array_elements_text(plan->0->'Plan'->'Plans') into num;
 	perform test.pathman_equal(num::text, '2', 'expected 2 child plans for custom scan');
+
+
+	/*
+	 * Test subquery under range partitioning
+	 */
+	plan = test.pathman_test('select * from test.runtime_test_range_1 where id = (select * from test.run_values limit 1)');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Node Type')::text,
+							   '"Custom Scan"',
+							   'wrong plan type');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Custom Plan Provider')::text,
+							   '"RuntimeAppend"',
+							   'wrong plan provider');
+
+	select count(*) from jsonb_array_elements_text(plan->0->'Plan'->'Plans') into num;
+	perform test.pathman_equal(num::text, '2', 'expected 2 child plans for custom scan');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Relation Name')::text,
+							   '"runtime_test_range_1_1"',
+							   'wrong partition');
 
 	return 'ok';
 end;
@@ -72,7 +96,10 @@ declare
 	plan jsonb;
 	num int;
 begin
-	plan = test.pathman_test('select * from test.runtime_test_1 where id = any (select * from test.run_values limit 4)');
+	/*
+	 * Test ANY expression under hash partitioning
+	 */
+	plan = test.pathman_test('select * from test.runtime_test_hash_1 where id = any (select * from test.run_values limit 4)');
 
 	perform test.pathman_equal((plan->0->'Plan'->'Node Type')::text,
 							   '"Nested Loop"',
@@ -91,12 +118,37 @@ begin
 
 	for i in 0..3 loop
 		perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Plans'->i->'Relation Name')::text,
-								   format('"runtime_test_1_%s"', pathman.get_hash_part_idx(hashint4(i + 1), 6)),
+								   format('"runtime_test_hash_1_%s"', pathman.get_hash_part_idx(hashint4(i + 1), 6)),
 								   'wrong partition');
 
 		num = plan->0->'Plan'->'Plans'->1->'Plans'->i->'Actual Loops';
 		perform test.pathman_equal(num::text, '1', 'expected 1 loop');
 	end loop;
+
+
+	/*
+	 * Test ANY expression under range partitioning
+	 */
+	plan = test.pathman_test('select * from test.runtime_test_range_1 where id = any (select * from test.run_values limit 4)');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Node Type')::text,
+							   '"Nested Loop"',
+							   'wrong plan type');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->0->'Node Type')::text,
+							   '"Aggregate"',
+							   'wrong plan type');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Node Type')::text,
+							   '"Custom Scan"',
+							   'wrong plan type');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Custom Plan Provider')::text,
+							   '"RuntimeAppend"',
+							   'wrong plan provider');
+
+	select count(*) from jsonb_array_elements_text(plan->0->'Plan'->'Plans'->1->'Plans') into num;
+	perform test.pathman_equal(num::text, '1', 'expected 1 child plans for custom scan');
 
 	return 'ok';
 end;
@@ -110,7 +162,10 @@ declare
 	plan jsonb;
 	num int;
 begin
-	plan = test.pathman_test('select * from test.runtime_test_1 a join test.run_values b on a.id = b.val');
+	/*
+	 * Test join under hash partitioning
+	 */
+	plan = test.pathman_test('select * from test.runtime_test_hash_1 a join test.run_values b on a.id = b.val');
 
 	perform test.pathman_equal((plan->0->'Plan'->'Node Type')::text,
 							   '"Nested Loop"',
@@ -131,6 +186,57 @@ begin
 		num = plan->0->'Plan'->'Plans'->1->'Plans'->i->'Actual Loops';
 		perform test.pathman_assert(num > 0 and num <= 1718, 'expected no more than 1718 loops');
 	end loop;
+
+
+	/*
+	 * Test selecting of specific partitions under join and hash partitioning
+	 */
+	plan = test.pathman_test('select * from test.runtime_test_hash_1 a join (select * from test.run_values limit 1) b on a.id = b.val');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Node Type')::text,
+							   '"Nested Loop"',
+							   'wrong plan type');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Node Type')::text,
+							   '"Custom Scan"',
+							   'wrong plan type');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Custom Plan Provider')::text,
+							   '"RuntimeAppend"',
+							   'wrong plan provider');
+
+	select count(*) from jsonb_array_elements_text(plan->0->'Plan'->'Plans'->1->'Plans') into num;
+	perform test.pathman_equal(num::text, '1', 'expected 1 child plans for custom scan');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Relation Name')::text,
+							   format('"runtime_test_hash_1_%s"', pathman.get_hash_part_idx(hashint4(1), 6)),
+							   'wrong partition');
+
+
+	/*
+	 * Test selecting of specific partitions under join and range partitioning
+	 */
+	plan = test.pathman_test('select * from test.runtime_test_hash_1 a join (select * from test.run_values limit 1) b on a.id = b.val');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Node Type')::text,
+							   '"Nested Loop"',
+							   'wrong plan type');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Node Type')::text,
+							   '"Custom Scan"',
+							   'wrong plan type');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Custom Plan Provider')::text,
+							   '"RuntimeAppend"',
+							   'wrong plan provider');
+
+	select count(*) from jsonb_array_elements_text(plan->0->'Plan'->'Plans'->1->'Plans') into num;
+	perform test.pathman_equal(num::text, '1', 'expected 1 child plans for custom scan');
+
+	perform test.pathman_equal((plan->0->'Plan'->'Plans'->1->'Relation Name')::text,
+							   '"runtime_test_hash_1_1"',
+							   'wrong partition');
+
 
 	return 'ok';
 end;
@@ -232,9 +338,12 @@ set enable_mergejoin = off;
 
 
 create table test.run_values as select generate_series(1, 10000) val;
-create table test.runtime_test_1(id serial primary key, val real);
-insert into test.runtime_test_1 select generate_series(1, 10000), random();
-select pathman.create_hash_partitions('test.runtime_test_1', 'id', 6);
+create table test.runtime_test_hash_1(id serial primary key, val real);
+insert into test.runtime_test_hash_1 select generate_series(1, 10000), random();
+select pathman.create_hash_partitions('test.runtime_test_hash_1', 'id', 6);
+create table test.runtime_test_range_1(id integer not null, val real);
+insert into test.runtime_test_range_1 select generate_series(1, 10000), random();
+select pathman.create_range_partitions('test.runtime_test_range_1', 'id', 0, 1000);
 
 create table test.category as (select id, 'cat' || id::text as name from generate_series(1, 4) id);
 create table test.runtime_test_2 (id serial, category_id int not null, name text, rating real);
@@ -251,7 +360,7 @@ create index on test.runtime_test_3_0 (id);
 
 
 analyze test.run_values;
-analyze test.runtime_test_1;
+analyze test.runtime_test_hash_1;
 analyze test.runtime_test_2;
 analyze test.runtime_test_3;
 analyze test.runtime_test_3_0;
