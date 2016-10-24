@@ -1,0 +1,50 @@
+\set VERBOSITY terse
+SET search_path = 'public';
+CREATE SCHEMA pathman;
+CREATE EXTENSION pg_pathman SCHEMA pathman;
+CREATE SCHEMA test;
+/* Init tables with range and hash partitioning */
+CREATE TABLE test.range_partitioned(id integer not null, val real);
+INSERT INTO test.range_partitioned SELECT generate_series(1, 10000), random();
+SELECT pathman.create_range_partitions('test.range_partitioned', 'id', 1, 1000);
+NOTICE:  sequence "range_partitioned_seq" does not exist, skipping
+ create_range_partitions 
+-------------------------
+                      10
+(1 row)
+
+CREATE TABLE test.hash_partitioned(id integer not null, val real);
+INSERT INTO test.hash_partitioned SELECT generate_series(1, 10000), random();
+SELECT pathman.create_hash_partitions('test.hash_partitioned', 'id', 6);
+ create_hash_partitions 
+------------------------
+                      6
+(1 row)
+
+/* Test select ... where id in (1, 2, 3, 4) */
+EXPLAIN (COSTS OFF) SELECT * FROM test.range_partitioned WHERE id IN (1, 2, 3, 4);
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Append
+   ->  Seq Scan on range_partitioned_1
+         Filter: (id = ANY ('{1,2,3,4}'::integer[]))
+(3 rows)
+
+EXPLAIN (COSTS OFF) SELECT * FROM test.hash_partitioned WHERE id IN (1, 2, 3, 4);
+                     QUERY PLAN                      
+-----------------------------------------------------
+ Append
+   ->  Seq Scan on hash_partitioned_2
+         Filter: (id = ANY ('{1,2,3,4}'::integer[]))
+   ->  Seq Scan on hash_partitioned_3
+         Filter: (id = ANY ('{1,2,3,4}'::integer[]))
+   ->  Seq Scan on hash_partitioned_4
+         Filter: (id = ANY ('{1,2,3,4}'::integer[]))
+   ->  Seq Scan on hash_partitioned_5
+         Filter: (id = ANY ('{1,2,3,4}'::integer[]))
+(9 rows)
+
+DROP SCHEMA test CASCADE;
+NOTICE:  drop cascades to 19 other objects
+DROP EXTENSION pg_pathman CASCADE;
+DROP SCHEMA pathman CASCADE;
