@@ -133,7 +133,7 @@ search_rangerel_result search_range_partition_eq(const Datum value,
 
 uint32 hash_to_part_index(uint32 value, uint32 partitions);
 
-void handle_modification_query(Query *parse);
+void rewrite_modification_query(Query *parse);
 void disable_inheritance(Query *parse);
 void disable_inheritance_cte(Query *parse);
 void disable_inheritance_subselect(Query *parse);

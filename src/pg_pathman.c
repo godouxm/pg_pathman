@@ -301,53 +301,65 @@ disable_inheritance_subselect_walker(Node *node, void *context)
 }
 
 /*
- * Checks if query affects only one partition. If true then substitute
+ * Check if this is an UPDATE or DELETE query and affects only single partition.
+ * In this case we replace parent table with a suitable partition. Then
+ * recursively check every CTE subquery
  */
 void
-handle_modification_query(Query *parse)
+rewrite_modification_query(Query *parse)
 {
-	const PartRelationInfo *prel;
-	List				   *ranges;
-	RangeTblEntry		   *rte;
-	WrapperNode			   *wrap;
-	Expr				   *expr;
-	WalkerContext			context;
+	ListCell	  *lc;
 
-	Assert(parse->commandType == CMD_UPDATE ||
-		   parse->commandType == CMD_DELETE);
 	Assert(parse->resultRelation > 0);
 
-	rte = rt_fetch(parse->resultRelation, parse->rtable);
-	prel = get_pathman_relation_info(rte->relid);
-
-	if (!prel)
-		return;
-
-	/* Parse syntax tree and extract partition ranges */
-	ranges = list_make1_irange(make_irange(0, PrelLastChild(prel), false));
-	expr = (Expr *) eval_const_expressions(NULL, parse->jointree->quals);
-	if (!expr)
-		return;
-
-	/* Parse syntax tree and extract partition ranges */
-	InitWalkerContext(&context, prel, NULL, false);
-	wrap = walk_expr_tree(expr, &context);
-
-	ranges = irange_list_intersect(ranges, wrap->rangeset);
-
-	/* If only one partition is affected then substitute parent table with partition */
-	if (irange_list_length(ranges) == 1)
+	if (parse->commandType == CMD_UPDATE || parse->commandType == CMD_DELETE)
 	{
-		IndexRange irange = linitial_irange(ranges);
-		if (irange.ir_lower == irange.ir_upper)
+		const PartRelationInfo *prel;
+		List				   *ranges;
+		RangeTblEntry		   *rte;
+		WrapperNode			   *wrap;
+		Expr				   *expr;
+		WalkerContext			context;
+
+		rte = rt_fetch(parse->resultRelation, parse->rtable);
+		prel = get_pathman_relation_info(rte->relid);
+
+		if (!prel)
+			return;
+
+		/* Parse syntax tree and extract partition ranges */
+		ranges = list_make1_irange(make_irange(0, PrelLastChild(prel), false));
+		expr = (Expr *) eval_const_expressions(NULL, parse->jointree->quals);
+		if (!expr)
+			return;
+
+		/* Parse syntax tree and extract partition ranges */
+		InitWalkerContext(&context, prel, NULL, false);
+		wrap = walk_expr_tree(expr, &context);
+
+		ranges = irange_list_intersect(ranges, wrap->rangeset);
+
+		/* If only one partition is affected then substitute parent table with partition */
+		if (irange_list_length(ranges) == 1)
 		{
-			Oid *children = PrelGetChildrenArray(prel);
-			rte->relid = children[irange.ir_lower];
-			rte->inh = false;
+			IndexRange irange = linitial_irange(ranges);
+			if (irange.ir_lower == irange.ir_upper)
+			{
+				Oid *children = PrelGetChildrenArray(prel);
+				rte->relid = children[irange.ir_lower];
+				rte->inh = false;
+			}
 		}
 	}
 
-	return;
+	/* Recursively walk through CTEs */
+	foreach(lc, parse->cteList)
+	{
+		CommonTableExpr *cte = (CommonTableExpr*) lfirst(lc);
+
+		if (IsA(cte->ctequery, Query))
+			(void) rewrite_modification_query((Query *) cte->ctequery);
+	}
 }
 
 /*

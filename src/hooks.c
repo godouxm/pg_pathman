@@ -454,13 +454,14 @@ pathman_planner_hook(Query *parse, int cursorOptions, ParamListInfo boundParams)
 			case CMD_DELETE:
 				disable_inheritance_cte(parse);
 				disable_inheritance_subselect(parse);
-				handle_modification_query(parse);
 				break;
 
 			default:
 				break;
 		}
 	}
+
+	(void) rewrite_modification_query(parse);
 
 	/* Invoke original hook if needed */
 	if (planner_hook_next)
