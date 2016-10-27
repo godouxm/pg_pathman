@@ -459,9 +459,9 @@ pathman_planner_hook(Query *parse, int cursorOptions, ParamListInfo boundParams)
 			default:
 				break;
 		}
-	}
 
-	(void) rewrite_modification_query(parse);
+		(void) rewrite_modification_query(parse);
+	}
 
 	/* Invoke original hook if needed */
 	if (planner_hook_next)
