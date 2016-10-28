@@ -350,6 +350,10 @@ rewrite_modification_query(Query *parse)
 				rte->inh = false;
 			}
 		}
+		else
+		{
+			rte->inh = true;
+		}
 	}
 
 	/* Recursively walk through CTEs */
