@@ -310,8 +310,6 @@ rewrite_modification_query(Query *parse)
 {
 	ListCell	  *lc;
 
-	Assert(parse->resultRelation > 0);
-
 	if (parse->commandType == CMD_UPDATE || parse->commandType == CMD_DELETE)
 	{
 		const PartRelationInfo *prel;
@@ -320,6 +318,8 @@ rewrite_modification_query(Query *parse)
 		WrapperNode			   *wrap;
 		Expr				   *expr;
 		WalkerContext			context;
+
+		Assert(parse->resultRelation > 0);
 
 		rte = rt_fetch(parse->resultRelation, parse->rtable);
 		prel = get_pathman_relation_info(rte->relid);
